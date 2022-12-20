@@ -199,6 +199,7 @@ fn process_fn_items(
     let mut type_vecs = Vec::new();
     let mut abi_dispatchers = Vec::new();
     let mut logged_types = Vec::new();
+    let mut message_types = Vec::new();
 
     let mut type_map = HashMap::new();
     let mut type_ids = FUEL_PRIMITIVES
@@ -219,6 +220,19 @@ fn process_fn_items(
 
                 logged_types.push(quote! {
                     #log_id => {
+                        self.decode_type(#ty_id, data);
+                    }
+                });
+            }
+        }
+
+        if let Some(parsed_message_types) = parsed.messages_types {
+            for typ in parsed_message_types {
+                let message_id = typ.message_id;
+                let ty_id = typ.application.type_id;
+
+                message_types.push(quote! {
+                    #message_id => {
                         self.decode_type(#ty_id, data);
                     }
                 });
@@ -411,6 +425,9 @@ fn process_fn_items(
                                                     quote! { self.#name.push(data); };
                                             }
                                             "MessageOut" => {
+                                                abi_decoders.push(decode_snippet(
+                                                    *ty_id, &ty, &name,
+                                                ));
                                                 messageout_decoder =
                                                     quote! { self.#name.push(data); };
                                             }
@@ -514,7 +531,11 @@ fn process_fn_items(
                 #scriptresult_decoder
             }
 
-            pub fn decode_messageout(&mut self, data: abi::MessageOut) {
+            pub fn decode_messageout(&mut self, msg_type_id: u64, data: abi::MessageOut) {
+                match msg_type_id {
+                    #(#message_types),*
+                    _ => Logger::warn("Unknown message type ID; check ABI to make sure that message types are well-formed")
+                }
                 #messageout_decoder
             }
 
@@ -575,8 +596,13 @@ fn process_fn_items(
                             }
                             Receipt::MessageOut { message_id, sender, recipient, amount, nonce, len, digest, data } => {
                                 #contract_conditional
-                                let payload = abi::MessageOut{ message_id, sender, recipient, amount, nonce, len, digest, data };
-                                decoder.decode_messageout(payload);
+                                let mut raw_message_type_id = [0; 8];
+                                raw_message_type_id.copy_from_slice(&data[0..8]);
+                                let message_type_id = u64::from_be_bytes(raw_message_type_id);
+
+                                let msg_data = data[8..].to_vec();
+                                let payload = abi::MessageOut{ message_id, sender, recipient, amount, nonce, len, digest, data: msg_data };
+                                decoder.decode_messageout(message_type_id, payload);
                             }
                             _ => {
                                 Logger::info("This type is not handled yet. (>'.')>");
@@ -638,9 +664,9 @@ pub fn get_abi_tokens(
     match Abigen::new(namespace, abi) {
         Ok(abi) => {
             let abigen = if is_native {
-                abi.expand()
+                abi.expand_contract()
             } else {
-                abi.no_std().expand()
+                abi.no_std().expand_contract()
             };
             match abigen {
                 Ok(tokens) => tokens,
